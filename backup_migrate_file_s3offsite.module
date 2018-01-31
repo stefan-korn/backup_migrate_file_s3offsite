@@ -1,0 +1,265 @@
+<?php
+
+use Aws\S3\S3Client;
+use Aws\S3\Exception\S3Exception;
+/**
+ * @file
+ * Functions to define the S3 backup destination.
+ */
+
+define('BACKUP_MIGRATE_S3OFFSITE_WATCHDOG', 'backup_migrate_s3offsite');
+
+/**
+ * Implements hook_backup_migrate_destination_subtypes().
+ */
+function backup_migrate_file_s3offsite_backup_migrate_destination_subtypes() {
+  return array(
+    'file-s3offsite' => array(
+      'type_name' => t('File S3 offsite'),
+      'description' => t('File Backup and offsite copy to S3.'),
+      'file' => drupal_get_path('module', 'backup_migrate_file_s3offsite') . '/destinations.file_s3offsite.inc',
+      'class' => 'backup_migrate_destination_file_s3offsite',
+      'can_create' => TRUE,
+      'local' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_libraries_info().
+ */
+function backup_migrate_file_s3offsite_libraries_info() {
+
+  // A library that (naturally) evolves over time with API changes.
+  $libraries['aws-sdk-php'] = array(
+    'name' => 'AWS SDK for PHP',
+    'vendor url' => 'http://aws.amazon.com/sdkforphp',
+    'download url' => 'https://github.com/aws/aws-sdk-php/releases',
+    'version arguments' => array(
+      'file' => 'CHANGELOG.md',
+      'pattern' => '@## (\d+\.\d+\.\d+)@',
+    ),
+    // Default list of files of the library to load. Important: Only specify
+    // third-party files belonging to the library here, not integration files of
+    // your module.
+    'files' => array(
+      // For PHP libraries, specify include files here, still relative to the
+      // library path.
+      'php' => array(
+        'aws-autoloader.php',
+      ),
+    ),
+  );
+  return $libraries;
+}
+
+/**
+ * Implements hook_requirements().
+ */
+function backup_migrate_file_s3offsite_requirements($phase) {
+  $requirements = array();
+  // Ensure translations do not break at install time
+  $t = get_t();
+
+  $requirements['backup_migrate_file_s3offsite'] = array(
+    'title' => $t('Backup And Migrate S3 Library'),
+  );
+
+  if (($library = libraries_detect('aws-sdk-php')) && !empty($library['installed'])) {
+    if (version_compare($library['version'], '3.0.0', '>=')) {
+      $requirements['backup_migrate_file_s3offsite']['value'] = $t('%version is unsupported', array('%version' => $library['version']));
+      $requirements['backup_migrate_file_s3offsite']['severity'] = REQUIREMENT_ERROR;
+      $requirements['backup_migrate_file_s3offsite']['description'] = $t('Please download install <a href="!url">version 2.x of aws-sdk-php library</a>.', array('!url' => $library['download url']));
+    }
+    else {
+      $requirements['backup_migrate_file_s3offsite']['value'] = $library['version'];
+      $requirements['backup_migrate_file_s3offsite']['severity'] = REQUIREMENT_OK;
+    }
+  }
+  else {
+    $requirements['backup_migrate_file_s3offsite']['value'] = $t('Not Installed');
+    $requirements['backup_migrate_file_s3offsite']['severity'] = REQUIREMENT_ERROR;
+    $requirements['backup_migrate_file_s3offsite']['description'] = $t('Please download install <a href="!url">version 2.x of aws-sdk-php library</a>.', array('!url' => $library['download url']));
+  }
+
+  return $requirements;
+}
+
+
+/**
+ * Implements hook_cron_queue_info().
+ * defining cron queues for uploading parts and finishing part upload
+ */
+function backup_migrate_s3_cron_queue_info()
+{
+    $queues = array();
+    $queues['aws_offsite'] = array(
+      'worker callback' => 'upload_to_aws',
+      'time' => variable_get('backup_migrate_s3offsite_workertime', 30),
+    );
+    $queues['aws_offsite_finish'] = array(
+        'worker callback' => 'finish_aws_upload',
+        'time' => variable_get('backup_migrate_s3offsite_workertime', 30),
+    );
+    return $queues;
+}
+
+/*
+ * Queue Worker Callback
+ * Upload Parts and creating another queue to track the uploaded parts
+ */
+function upload_to_aws($item) {
+
+  $file = fopen($item['filepath'], 'r');
+  if($file) {
+    stream_set_chunk_size($file, $item['chunksize'] * 1024 * 1024);
+    fseek($file, ($item['partno'] - 1) * $item['chunksize'] * 1024 * 1024);
+    $content = fread($file, $item['chunksize'] * 1024 * 1024);
+    $s3 = s3_aws_offsite_init($item['destination']);
+    try {
+      $result = $s3->uploadPart([
+        'Bucket' => $item['Bucket'],
+        'Key' => $item['filename'],
+        'UploadId' => $item['uploadid'],
+        'PartNumber' => $item['partno'],
+        'Body' => $content,
+      ]);
+      $queue = DrupalQueue::get('aws_offsite_part_' . $item['uploadid']);
+      $partitem = [
+        'PartNumber' => $item['partno'],
+        'ETag' => $result['ETag'],
+        'UploadId' => $item['uploadid'],
+        'Key' => $item['filename'],
+      ];
+      $queue->createItem($partitem);
+      if ($item['last'] === TRUE) {
+        $finishqueue = DrupalQueue::get('aws_offsite_finish');
+        $finishitem = [
+          'UploadId' => $item['uploadid'],
+          'Key' => $item['filename'],
+          'destination' => $item['destination'],
+          'Bucket' => $item['Bucket'],
+        ];
+        $finishqueue->createItem($finishitem);
+      }
+    } catch (S3Exception $e) {
+      $result = $s3->abortMultipartUpload([
+        'Bucket' => $item['Bucket'],
+        'Key' => $item['filename'],
+        'UploadId' => $item['uploadid']
+      ]);
+      watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, t(
+          'Multipart Upload to S3 failed. Key: !key, UploadId: !uploadid, Part: !partno',
+          array(
+            '!key' => $item['Key'],
+            '!uploadid' => $item['UploadId'],
+            '!partno' => $item['partno'],
+          )
+        ), WATCHDOG_ERROR
+      );
+    }
+  }
+  else {
+    watchdog(
+      BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,
+      t('Multipart Upload to S3 failed. Opening file !filepath failed.',
+      array(
+        '!filepath' => $item['filepath'],
+        )
+      ),
+      WATCHDOG_ERROR
+    );
+  }
+  fclose($file);
+}
+/*
+ * Queue Worker Callback
+ * Finish the multipart upload to S3
+ */
+function finish_aws_upload($item) {
+  $queue = DrupalQueue::get('aws_offsite_part_'.$item['UploadId']);
+  $parts = array();
+  $s3 = s3_aws_offsite_init($item['destination']);
+  while($partitem = $queue->claimitem()) {
+    $parts[] = array(
+      'PartNumber' => $partitem->data['PartNumber'],
+      'ETag' => $partitem->data['ETag'],
+    );
+    $queue->deleteItem($partitem);
+  }
+  try {
+    $result = $s3->completeMultipartUpload(array(
+      'Bucket' => $item['Bucket'],
+      'Key' => $item['Key'],
+      'UploadId' => $item['UploadId'],
+      'Parts' => $parts,
+    ));
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, t(
+        'Completing Multipart Upload to S3 succeeded. Key: !key, UploadId: !uploadid',
+        array(
+          '!key' => $item['Key'],
+          '!uploadid' => $item['UploadId'],
+        )
+      )
+    );
+  }
+  catch (S3Exception $e) {
+    $result = $s3->abortMultipartUpload(array(
+      'Bucket' => $item['Bucket'],
+      'Key' => $item['Key'],
+      'UploadId' => $item['UploadId']
+    ));
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, t(
+      'Completing Multipart Upload to S3 failed. Key: !key, UploadId: !uploadid',
+      array(
+        '!filepath' => $item['filepath'],
+        '!uploadid' => $item['UploadId'],
+        )
+      ),
+      WATCHDOG_ERROR
+    );
+  }
+}
+/*
+ * Init S3 Client with settings from destination
+ */
+function s3_aws_offsite_init($destinationid)
+{
+  $destination = backup_migrate_get_destination($destinationid);
+
+  libraries_load('aws-sdk-php');
+  $config = array(
+    'base_url' => 'https://'.$destination->settings['aws_host'],
+    'key' => $destination->settings['aws_accesskey'],
+    'secret' => $destination->settings['aws_secret_accesskey'],
+  );
+
+  $config['signature'] = 'v4';
+
+  $config['region'] = $destination->settings['s3_region'];
+
+  $s3 = S3Client::factory($config);
+  return $s3;
+}
+
+
+/*
+ * Numeric validation - element validate callback
+ */
+function _bmfs3_numeric_validate($element, &$form_state) {
+  if ($element['#value'] && !is_numeric($element['#value'])) {
+    form_error($element, t('@fieldname must be numeric.', array('@fieldname' => $element['#title'])));
+  }
+}
+/*
+ * Secret Key validation, allow field to be empty if secret key is already saved
+ */
+function _bmfs3_seckey_validate($element, &$form_state) {
+  if (empty($element['#value'])) {
+    if (is_object($form_state['values']['item']) && property_exists($form_state['values']['item'], 'settings')) {
+      if(empty($form_state['values']['item']->settings['aws_secret_accesskey'])) {
+        form_error($element, t('@fieldname is necessary', array('@fieldname' => $element['#title'])));
+      }
+    }
+  }
+}

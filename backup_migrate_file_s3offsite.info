@@ -1,0 +1,5 @@
+name = Backup and Migrate File S3 Offsite - Queued
+description = "Allows Backup and Migrate to save a offsite copy of a file backup to AWS S3 service within a queued process."
+core = 7.x
+dependencies[] = backup_migrate
+dependencies[] = libraries
