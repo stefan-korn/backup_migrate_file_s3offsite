@@ -90,7 +90,7 @@ function backup_migrate_file_s3offsite_requirements($phase) {
  * Implements hook_cron_queue_info().
  * defining cron queues for uploading parts and finishing part upload
  */
-function backup_migrate_s3_cron_queue_info()
+function backup_migrate_file_s3offsite_cron_queue_info()
 {
     $queues = array();
     $queues['aws_offsite'] = array(
@@ -253,6 +253,7 @@ function _bmfs3_numeric_validate($element, &$form_state) {
 }
 /*
  * Secret Key validation, allow field to be empty if secret key is already saved
+ * element validate callback
  */
 function _bmfs3_seckey_validate($element, &$form_state) {
   if (empty($element['#value'])) {

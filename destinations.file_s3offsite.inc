@@ -1,5 +1,5 @@
 <?php
-
+libraries_load('aws-sdk-php');
 use Aws\S3\S3Client;
 use Aws\S3\Exception\S3Exception;
 
@@ -38,11 +38,11 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
       $filepath = rtrim($dir, "/") ."/". $file->filename();
       // Copy the file if there are multiple destinations.
       if (count($settings->get_destinations()) > 1) {
-        file_unmanaged_copy($file->filepath(), $filepath);
+        $finalpath = file_unmanaged_copy($file->filepath(), $filepath);
       }
       // Otherwise we can move it and save a delete.
       else {
-        file_unmanaged_move($file->filepath(), $filepath);
+        $finalpath = file_unmanaged_move($file->filepath(), $filepath);
       }
 
       // chmod, chown and chgrp the file if needed.
@@ -58,17 +58,19 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
       }
 
       // AWS offsite transfer part
+      $destinationid = reset($settings->destination_id);
+      $destination = backup_migrate_get_destination($destinationid);
       $partNumber = 1;
       $queue = DrupalQueue::get('aws_offsite');
-      $fileforq = fopen($filepath, 'r');
+      $fileforq = fopen($finalpath, 'r');
       if($fileforq) {
-        stream_set_chunk_size($fileforq, $settings->destinations[0]->settings['chunksize'] * 1024 * 1024);
+        stream_set_chunk_size($fileforq, $destination->settings['chunksize'] * 1024 * 1024);
         $items = [];
-        $s3 = s3_aws_offsite_init($settings->destination_id[0]);
+        $s3 = s3_aws_offsite_init($destinationid);
         try {
         $response = $s3->createMultipartUpload([
-          'Bucket' => $settings->destinations[0]->settings['aws_bucket'],
-          'Key' => $file->filename(),
+          'Bucket' => $destination->settings['aws_bucket'],
+          'Key' => basename($finalpath),
         ]);
         $uploadId = $response['UploadId'];
           watchdog(
@@ -76,7 +78,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
             t(
               'Starting Multipart Upload to S3 succeeded. Key: !key, UploadId: !uploadid',
               array(
-                '!key' => $file->filename(),
+                '!key' => basename($finalpath),
                 '!uploadid' => $uploadId,
               )
             )
@@ -87,7 +89,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
             t(
             'Starting Multipart Upload to S3 failed. Key: !key, UploadId: !uploadid, Part: !partno',
             array(
-              '!key' => $file->filename(),
+              '!key' => basename($finalpath),
               )
             ),
             WATCHDOG_ERROR
@@ -97,15 +99,15 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
         while (!feof($fileforq)) {
           $items[] = [
             'partno' => $partNumber,
-            'filepath' => $filepath,
-            'filename' => $file->filename(),
+            'filepath' => $finalpath,
+            'filename' => basename($finalpath),
             'last' => FALSE,
             'uploadid' => $uploadId,
-            'destination' => $settings->destination_id[0],
-            'chunksize' => $settings->destinations[0]->settings['chunksize'],
-            'Bucket' => $settings->destinations[0]->settings['aws_bucket'],
+            'destination' => $destinationid,
+            'chunksize' => $destination->settings['chunksize'],
+            'Bucket' => $destination->settings['aws_bucket'],
           ];
-          fread($fileforq, $settings->destinations[0]->settings['chunksize'] * 1024 * 1024);
+          fread($fileforq, $destination->settings['chunksize'] * 1024 * 1024);
           $partNumber++;
         }
         fclose($fileforq);
@@ -123,7 +125,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
           BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,
           t('Error starting AWS offsite transfer. Opening file !filepath failed.',
             array(
-              '!filepath' => $filepath,
+              '!filepath' => $finalpath,
             )
           ),
           WATCHDOG_ERROR
@@ -217,7 +219,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
     $form['aws_host'] = array(
       '#type' => 'textfield',
       '#title' => t('AWS Host'),
-      '#default_value' => $this->settings['aws_host']?$this->settings['aws_host']:'s3.amazonaws.com',
+      '#default_value' => $this->settings?$this->settings['aws_host']:'s3.amazonaws.com',
       '#required' => TRUE,
       '#description' => t('Enter the S3 AWS host, without the scheme part, will be https:// prefixed automatically.')
     );
@@ -226,14 +228,14 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
       '#title' => t('AWS bucket name'),
       '#required' => TRUE,
       '#description' => t('Enter the AWS S3 bucket name, must exist already.'),
-      '#default_value' => $this->settings['aws_bucket'],
+      '#default_value' => $this->settings?$this->settings['aws_bucket']:'',
     );
     $form['aws_accesskey'] = array(
       '#type' => 'textfield',
       '#title' => t('AWS Access Key'),
       '#required' => TRUE,
       '#description' => t('Enter the AWS access key.'),
-      '#default_value' => $this->settings['aws_accesskey'],
+      '#default_value' => $this->settings?$this->settings['aws_accesskey']:'',
     );
     $form['aws_secret_accesskey'] = array(
       '#type' => 'password',
@@ -245,7 +247,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
       '#type' => 'textfield',
       '#title' => t('AWS S3 region'),
       '#description' => t('Optional specify region if necessary, system tries to evaluate the region.'),
-      '#default_value' => $this->settings['s3_region'],
+      '#default_value' => $this->settings?$this->settings['s3_region']:'',
     );
     $form['cron_workertime'] = array(
       '#type' => 'textfield',
@@ -262,7 +264,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
       '#description' => t('Enter the upload chunk size. AWS multipart upload
       will use this size and split larger files in chunks of that size. You should select
       a chunk size that can be handled at least once in worker time.'),
-      '#default_value' => $this->settings['chunksize'],
+      '#default_value' => $this->settings?$this->settings['chunksize']:'10',
       '#element_validate' => array('_bmfs3_numeric_validate'),
     );
     $form['settings'] = array(
