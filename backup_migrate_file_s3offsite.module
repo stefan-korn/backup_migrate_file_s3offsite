@@ -148,29 +148,20 @@ function upload_to_aws($item) {
         'Key' => $item['filename'],
         'UploadId' => $item['uploadid']
       ]);
-      watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, t(
-          'Multipart Upload to S3 failed. Key: !key, UploadId: !uploadid, Part: !partno',
-          array(
-            '!key' => $item['Key'],
-            '!uploadid' => $item['UploadId'],
-            '!partno' => $item['partno'],
-          )
-        ), WATCHDOG_ERROR
-      );
+      watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Multipart Upload to S3 failed. Key: %key, UploadId: %uploadid, Part: %partno', array('%key' => $item['Key'],'%uploadid' => $item['UploadId'],'%partno' => $item['partno']),WATCHDOG_ERROR);
     }
+    fclose($file);
   }
   else {
-    watchdog(
-      BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,
-      t('Multipart Upload to S3 failed. Opening file !filepath failed.',
-      array(
-        '!filepath' => $item['filepath'],
-        )
-      ),
-      WATCHDOG_ERROR
-    );
+    $s3 = s3_aws_offsite_init($item['destination']);
+    $result = $s3->abortMultipartUpload([
+      'Bucket' => $item['Bucket'],
+      'Key' => $item['filename'],
+      'UploadId' => $item['uploadid']
+    ]);
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Multipart Upload to S3 failed. Opening file %filepath failed.', array('%filepath' => $item['filepath']),WATCHDOG_ERROR);
   }
-  fclose($file);
+
 }
 /*
  * Queue Worker Callback
@@ -194,14 +185,7 @@ function finish_aws_upload($item) {
       'UploadId' => $item['UploadId'],
       'Parts' => $parts,
     ));
-    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, t(
-        'Completing Multipart Upload to S3 succeeded. Key: !key, UploadId: !uploadid',
-        array(
-          '!key' => $item['Key'],
-          '!uploadid' => $item['UploadId'],
-        )
-      )
-    );
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Completing Multipart Upload to S3 succeeded. Key: %key, UploadId: %uploadid', array('%key' => $item['Key'], '%uploadid' => $item['UploadId']));
   }
   catch (S3Exception $e) {
     $result = $s3->abortMultipartUpload(array(
@@ -209,15 +193,7 @@ function finish_aws_upload($item) {
       'Key' => $item['Key'],
       'UploadId' => $item['UploadId']
     ));
-    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, t(
-      'Completing Multipart Upload to S3 failed. Key: !key, UploadId: !uploadid',
-      array(
-        '!filepath' => $item['filepath'],
-        '!uploadid' => $item['UploadId'],
-        )
-      ),
-      WATCHDOG_ERROR
-    );
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Completing Multipart Upload to S3 failed. Key: %key, UploadId: %uploadid', array('%filepath' => $item['filepath'],'%uploadid' => $item['UploadId']),WATCHDOG_ERROR);
   }
 }
 /*

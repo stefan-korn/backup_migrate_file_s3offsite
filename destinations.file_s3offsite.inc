@@ -73,27 +73,9 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
           'Key' => basename($finalpath),
         ]);
         $uploadId = $response['UploadId'];
-          watchdog(
-            BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,
-            t(
-              'Starting Multipart Upload to S3 succeeded. Key: !key, UploadId: !uploadid',
-              array(
-                '!key' => basename($finalpath),
-                '!uploadid' => $uploadId,
-              )
-            )
-          );
+          watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Starting Multipart Upload to S3 succeeded. Key: %key, UploadId: %uploadid', array('%key' => basename($finalpath),'%uploadid' => $uploadId));
         } catch (S3Exception $e) {
-          watchdog(
-            BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,
-            t(
-            'Starting Multipart Upload to S3 failed. Key: !key, UploadId: !uploadid, Part: !partno',
-            array(
-              '!key' => basename($finalpath),
-              )
-            ),
-            WATCHDOG_ERROR
-          );
+          watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Starting Multipart Upload to S3 failed. Key: %key', array('%key' => basename($finalpath)),WATCHDOG_ERROR);
         }
 
         while (!feof($fileforq)) {
@@ -121,15 +103,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
         }
       }
       else {
-        watchdog(
-          BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,
-          t('Error starting AWS offsite transfer. Opening file !filepath failed.',
-            array(
-              '!filepath' => $finalpath,
-            )
-          ),
-          WATCHDOG_ERROR
-        );
+        watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Error starting AWS offsite transfer. Opening file %filepath failed.', array('%filepath' => $finalpath),WATCHDOG_ERROR);
       }
       // End AWS Offsite transfer part
 
