@@ -8,6 +8,7 @@ use Aws\S3\Exception\S3Exception;
  */
 
 define('BACKUP_MIGRATE_S3OFFSITE_WATCHDOG', 'backup_migrate_s3offsite');
+define('BACKUP_MIGRATE_S3OFFSITE_MAILTOKEN', 'BMS3OMultiStart');
 
 /**
  * Implements hook_backup_migrate_destination_subtypes().
@@ -138,6 +139,7 @@ function upload_to_aws($item) {
           'UploadId' => $item['uploadid'],
           'Key' => $item['filename'],
           'destination' => $item['destination'],
+          'profile' => $item['profile'],
           'Bucket' => $item['Bucket'],
         ];
         $finishqueue->createItem($finishitem);
@@ -186,6 +188,14 @@ function finish_aws_upload($item) {
       'Parts' => $parts,
     ));
     watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Completing Multipart Upload to S3 succeeded. Key: %key, UploadId: %uploadid', array('%key' => $item['Key'], '%uploadid' => $item['UploadId']));
+    $settings = backup_migrate_get_profile($item['profile']);
+    if (@$settings->filters['notify_success_enable'] && $to = @$settings->filters['notify_success_email']) {
+      $body = array();
+      $body[] = t('Backup to S3 succesfully finished');
+      $body[] = t('S3 path: !s3path', array('!s3path' => l($result['Location'], $result['Location'])));
+      $body[] = t('UploadId: !uploadid', array('!uploadid' => $item['UploadId']));
+      drupal_mail('backup_migrate_file_s3offsite', 's3_backup_succeed', $settings->filters['notify_success_email'], language_default(), array('body' => $body));
+    }
   }
   catch (S3Exception $e) {
     $result = $s3->abortMultipartUpload(array(
@@ -239,4 +249,32 @@ function _bmfs3_seckey_validate($element, &$form_state) {
       }
     }
   }
+}
+
+/**
+ * Implements hook_mail().
+ */
+function backup_migrate_file_s3offsite_mail($key, &$message, $params) {
+  if ($key == 's3_backup_succeed') {
+    $message['id'] = 'backup_migrate_file_s3offsite_backup_succeed';
+    $message['subject'] = t('!site S3 backup succeeded', array('!site' => variable_get('site_name', 'Drupal site')));
+    $message['body'] = $params['body'];
+  }
+  else if ($key == 's3_backup_fail') {
+    $message['id'] = 'backup_migrate_file_s3offsite_backup_fail';
+    $message['subject'] = t('!site S3 backup failed', array('!site' => variable_get('site_name', 'Drupal site')));
+    $message['body'][] = $params['body'];
+  }
+}
+
+/**
+ * Implements hook_mail_alter().
+ */
+function backup_migrate_file_s3offsite_mail_alter(&$message) {
+ if($message['module'] == 'backup_migrate' && $message['key'] == 'backup_succeed')
+ {
+   if(strpos($message['body'][0], BACKUP_MIGRATE_S3OFFSITE_MAILTOKEN)) {
+     $message['subject'] = t('Only local part, S3 sync still pending - ') . $message['subject'];
+   }
+ }
 }

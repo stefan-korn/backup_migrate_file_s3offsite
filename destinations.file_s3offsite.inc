@@ -74,6 +74,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
         ]);
         $uploadId = $response['UploadId'];
           watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Starting Multipart Upload to S3 succeeded. Key: %key, UploadId: %uploadid', array('%key' => basename($finalpath),'%uploadid' => $uploadId));
+          _backup_migrate_message('This is only indicating the start of multipart upload to S3 of file @file [!mailtoken]. Wait for final message.', array('@file' => basename($finalpath), '!mailtoken' => BACKUP_MIGRATE_S3OFFSITE_MAILTOKEN));
         } catch (S3Exception $e) {
           watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Starting Multipart Upload to S3 failed. Key: %key', array('%key' => basename($finalpath)),WATCHDOG_ERROR);
         }
@@ -86,6 +87,7 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
             'last' => FALSE,
             'uploadid' => $uploadId,
             'destination' => $destinationid,
+            'profile' => $settings->machine_name,
             'chunksize' => $destination->settings['chunksize'],
             'Bucket' => $destination->settings['aws_bucket'],
           ];
