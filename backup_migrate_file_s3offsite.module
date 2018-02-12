@@ -112,6 +112,7 @@ function backup_migrate_file_s3offsite_cron_queue_info()
 function upload_to_aws($item) {
 
   $file = fopen($item['filepath'], 'r');
+  $settings = backup_migrate_get_profile($item['profile']);
   if($file) {
     stream_set_chunk_size($file, $item['chunksize'] * 1024 * 1024);
     fseek($file, ($item['partno'] - 1) * $item['chunksize'] * 1024 * 1024);
@@ -152,6 +153,15 @@ function upload_to_aws($item) {
         'UploadId' => $item['uploadid']
       ]);
       watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Multipart Upload to S3 failed. Key: %key, UploadId: %uploadid, Part: %partno', array('%key' => $item['Key'],'%uploadid' => $item['UploadId'],'%partno' => $item['partno']),WATCHDOG_ERROR);
+      if (@$settings->filters['notify_failure_enable'] && $to = @$settings->filters['notify_failure_email']) {
+        $body = [];
+        $body[] = t('Multipart Upload to S3 failed.');
+        $body[] = t('File: %key', ['%key' => $item['Key']]);
+        $body[] = t('UploadId: %uploadid', ['%uploadid' => $item['UploadId']]);
+        $body[] = t('Part: %partno', ['%partno' => $item['partno']]);
+        drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
+      }
+      remove_from_queue_upload_failed($item['uploadid']);
     }
     fclose($file);
   }
@@ -163,8 +173,23 @@ function upload_to_aws($item) {
       'UploadId' => $item['uploadid']
     ]);
     watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Multipart Upload to S3 failed. Opening file %filepath failed.', array('%filepath' => $item['filepath']),WATCHDOG_ERROR);
+    if (@$settings->filters['notify_failure_enable'] && $to = @$settings->filters['notify_failure_email']) {
+      $body = [];
+      $body[] = t('Multipart Upload to S3 failed.');
+      $body[] = t('Opening file %filepath failed.', ['%filepath' => $item['filepath']]);
+      drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
+    }
+    remove_from_queue_upload_failed($item['uploadid']);
   }
 
+}
+function remove_from_queue_upload_failed($uploadid) {
+  $removequeue = DrupalQueue::get('aws_offsite');
+  while($item = $removequeue->claimItem()) {
+    if($item->data['uploadid'] == $uploadid) {
+      $removequeue->deleteItem($item);
+    }
+  }
 }
 /*
  * Queue Worker Callback
@@ -174,7 +199,8 @@ function finish_aws_upload($item) {
   $queue = DrupalQueue::get('aws_offsite_part_'.$item['UploadId']);
   $parts = array();
   $s3 = s3_aws_offsite_init($item['destination']);
-  while($partitem = $queue->claimitem()) {
+  $settings = backup_migrate_get_profile($item['profile']);
+  while($partitem = $queue->claimItem()) {
     $parts[] = array(
       'PartNumber' => $partitem->data['PartNumber'],
       'ETag' => $partitem->data['ETag'],
@@ -188,23 +214,36 @@ function finish_aws_upload($item) {
       'UploadId' => $item['UploadId'],
       'Parts' => $parts,
     ));
-    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Completing Multipart Upload to S3 succeeded. Key: %key, UploadId: %uploadid', array('%key' => $item['Key'], '%uploadid' => $item['UploadId']));
-    $settings = backup_migrate_get_profile($item['profile']);
-    if (@$settings->filters['notify_success_enable'] && $to = @$settings->filters['notify_success_email']) {
-      $check = $s3->headObject(array(
+    $check = $s3->headObject([
         'Bucket' => $item['Bucket'],
         'Key' => $item['Key'],
-        )
-      );
-      if ($check['ContentLength'] == $item['size_original']) {
+      ]
+    );
+    if ($check['ContentLength'] == $item['size_original']) {
+      $sizecheck = TRUE;
+      watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Completing Multipart Upload to S3 succeeded. Key: %key, UploadId: %uploadid', array('%key' => $item['Key'], '%uploadid' => $item['UploadId']));
+    }
+    else {
+      $sizecheck = FALSE;
+      watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'File size between local file and S3 copy differs. Key: %key, UploadId: %uploadid. Local file = !original, S3 file = !remote', array('%key' => $item['Key'], '%uploadid' => $item['UploadId'], '!original' => $item['size_original'], '!remote' => $check['ContentLength']));
+    }
+    if (@$settings->filters['notify_success_enable'] && $to = @$settings->filters['notify_success_email']) {
+      if ($sizecheck) {
         $body = [];
         $body[] = t('Backup to S3 succesfully finished');
         $body[] = t('S3 path: !s3path', ['!s3path' => l($result['Location'], $result['Location'])]);
         $body[] = t('UploadId: !uploadid', ['!uploadid' => $item['UploadId']]);
         drupal_mail('backup_migrate_file_s3offsite', 's3_backup_succeed', $settings->filters['notify_success_email'], language_default(), ['body' => $body]);
       }
-      else {
-        watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'File size between local file and S3 copy differs. Local file = !original, S3 file = !remote', array('!original' => $item['size_original'], '!remote' => $check['ContentLength']));
+    }
+    if (@$settings->filters['notify_failure_enable'] && $to = @$settings->filters['notify_failure_email']) {
+      if($sizecheck === FALSE) {
+        $body = [];
+        $body[] = t('File size between local file and S3 copy differs.');
+        $body[] = t('Local file = !original', ['!original' => $item['size_original']]);
+        $body[] = t('S3 file = !remote', ['!remote' => $check['ContentLength']]);
+        $body[] = t('Upload Id: !uploadid', ['!uploadid' => $item['UploadId']]);
+        drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
       }
     }
   } catch (S3Exception $e) {
@@ -213,7 +252,18 @@ function finish_aws_upload($item) {
       'Key' => $item['Key'],
       'UploadId' => $item['UploadId']
     ));
-    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG,'Completing Multipart Upload to S3 failed. Key: %key, UploadId: %uploadid', array('%filepath' => $item['filepath'],'%uploadid' => $item['UploadId']),WATCHDOG_ERROR);
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, 'Completing Multipart Upload to S3 failed. Key: %key, UploadId: %uploadid', [
+      '%filepath' => $item['filepath'],
+      '%uploadid' => $item['UploadId']
+    ], WATCHDOG_ERROR);
+    if (@$settings->filters['notify_failure_enable'] && $to = @$settings->filters['notify_failure_email']) {
+      $body = [];
+      $body[] = t('Completing Multipart Upload to S3 failed.');
+      $body[] = t('Error Message: !message', array('!message' => $e->getMessage()));
+      $body[] = t('File path: !file', array('!file' => $item['filepath']));
+      $body[] = t('Upload Id: !uploadid', array('!uploadid' => $item['UploadId']));
+      drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
+    }
   }
 }
 /*
