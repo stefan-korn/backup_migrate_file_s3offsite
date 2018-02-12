@@ -205,7 +205,6 @@ function finish_aws_upload($item) {
       'PartNumber' => $partitem->data['PartNumber'],
       'ETag' => $partitem->data['ETag'],
     );
-    $queue->deleteItem($partitem);
   }
   try {
     $result = $s3->completeMultipartUpload(array(
@@ -246,23 +245,55 @@ function finish_aws_upload($item) {
         drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
       }
     }
+    $queue->deleteQueue();
+    $retryqueue = DrupalQueue::get('aws_offsite_retry_'.$item['UploadId']);
+    $retryqueue->deleteQueue();
   } catch (S3Exception $e) {
-    $result = $s3->abortMultipartUpload(array(
-      'Bucket' => $item['Bucket'],
-      'Key' => $item['Key'],
-      'UploadId' => $item['UploadId']
-    ));
-    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, 'Completing Multipart Upload to S3 failed. Key: %key, UploadId: %uploadid', [
-      '%filepath' => $item['filepath'],
-      '%uploadid' => $item['UploadId']
-    ], WATCHDOG_ERROR);
-    if (@$settings->filters['notify_failure_enable'] && $to = @$settings->filters['notify_failure_email']) {
-      $body = [];
-      $body[] = t('Completing Multipart Upload to S3 failed.');
-      $body[] = t('Error Message: !message', array('!message' => $e->getMessage()));
-      $body[] = t('File path: !file', array('!file' => $item['filepath']));
-      $body[] = t('Upload Id: !uploadid', array('!uploadid' => $item['UploadId']));
-      drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
+    watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, 'Completing Multipart Upload to S3 failed. File: %file, UploadId: %uploadid, Message: %message', [
+      '%file' => $item['Key'],
+      '%uploadid' => $item['UploadId'],
+      '%message' => $e->getMessage(),
+    ], WATCHDOG_WARNING);
+    $retryqueue = DrupalQueue::get('aws_offsite_retry_'.$item['UploadId']);
+    if($retryitem = $retryqueue->claimItem()) {
+      if ($retryitem->data['pass'] < 3) {
+        $newitem = $retryitem;
+        $newitem->data['pass'] = $newitem->data['pass']+1;
+        $retryqueue->deleteItem($retryitem);
+        $retryqueue->createItem($newitem->data);
+        throw new Exception('Completing Multipart Upload failed. Will try once more.');
+        }
+      else {
+        $retryqueue->deleteItem($retryitem);
+        $result = $s3->abortMultipartUpload(array(
+          'Bucket' => $item['Bucket'],
+          'Key' => $item['Key'],
+          'UploadId' => $item['UploadId']
+        ));
+        watchdog(BACKUP_MIGRATE_S3OFFSITE_WATCHDOG, 'Completing Multipart Upload to S3 finally failed. File: %file, UploadId: %uploadid, Message: %message', [
+          '%file' => $item['Key'],
+          '%uploadid' => $item['UploadId'],
+          '%message' => $e->getMessage(),
+        ], WATCHDOG_ERROR);
+        if (@$settings->filters['notify_failure_enable'] && $to = @$settings->filters['notify_failure_email']) {
+          $body = [];
+          $body[] = t('Completing Multipart Upload to S3 failed.');
+          $body[] = t('Error Message: !message', array('!message' => $e->getMessage()));
+          $body[] = t('File: !file', array('!file' => $item['Key']));
+          $body[] = t('Upload Id: !uploadid', array('!uploadid' => $item['UploadId']));
+          drupal_mail('backup_migrate_file_s3offsite', 's3_backup_fail', $settings->filters['notify_failure_email'], language_default(), ['body' => $body]);
+        }
+        $partqueue = DrupalQueue::get('aws_offsite_part_'.$item['UploadId']);
+        $partqueue->deleteQueue();
+      }
+    }
+    else {
+      $newitem = array(
+        'uploadid' => $item['UploadId'],
+        'pass' => 1
+      );
+      $retryqueue->createItem($newitem);
+      throw new Exception('Completing Multipart Upload failed. Will try once more');
     }
   }
 }
@@ -323,7 +354,7 @@ function backup_migrate_file_s3offsite_mail($key, &$message, $params) {
   else if ($key == 's3_backup_fail') {
     $message['id'] = 'backup_migrate_file_s3offsite_backup_fail';
     $message['subject'] = t('!site S3 backup failed', array('!site' => variable_get('site_name', 'Drupal site')));
-    $message['body'][] = $params['body'];
+    $message['body'] = $params['body'];
   }
 }
 
@@ -333,8 +364,11 @@ function backup_migrate_file_s3offsite_mail($key, &$message, $params) {
 function backup_migrate_file_s3offsite_mail_alter(&$message) {
  if($message['module'] == 'backup_migrate' && $message['key'] == 'backup_succeed')
  {
+   // Do not send the regular success message from backup and migrate because
+   // S3 copy is still to be done. Separate sucess mail will be send if
+   // succesfully copied to S3
    if(strpos($message['body'][0], BACKUP_MIGRATE_S3OFFSITE_MAILTOKEN)) {
-     $message['subject'] = t('Only local part, S3 sync still pending - ') . $message['subject'];
+     $message['send'] = FALSE;
    }
  }
 }
