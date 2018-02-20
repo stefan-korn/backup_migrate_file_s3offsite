@@ -197,15 +197,22 @@ function remove_from_queue_upload_failed($uploadid) {
  */
 function finish_aws_upload($item) {
   $queue = DrupalQueue::get('aws_offsite_part_'.$item['UploadId']);
+  $checkqueue = DrupalQueue::get('aws_offsite');
+  while ($checkitem = $checkqueue->claimItem()) {
+    if($checkitem->data['uploadid'] == $item['UploadId']) {
+      throw new Exception('There are still parts to upload.');
+    }
+  }
   $parts = array();
   $s3 = s3_aws_offsite_init($item['destination']);
   $settings = backup_migrate_get_profile($item['profile']);
   while($partitem = $queue->claimItem()) {
-    $parts[] = array(
+    $parts[$partitem->data['PartNumber']] = array(
       'PartNumber' => $partitem->data['PartNumber'],
       'ETag' => $partitem->data['ETag'],
     );
   }
+  ksort($parts, SORT_NUMERIC);
   try {
     $result = $s3->completeMultipartUpload(array(
       'Bucket' => $item['Bucket'],

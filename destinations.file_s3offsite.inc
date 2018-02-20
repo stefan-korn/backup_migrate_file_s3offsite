@@ -298,6 +298,10 @@ class backup_migrate_destination_file_s3offsite extends backup_migrate_destinati
 
       $this->validate_s3_connection($form_state);
     }
+    if($values['chunksize'] < 5) {
+      $form_state['values']['chunksize'] = 5;
+      drupal_set_message('Chunksize needs to be 5 MB at least. Set to 5 MB.');
+    }
   }
   /*
    * Validating the S3 connection during destination setup
